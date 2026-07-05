@@ -10,6 +10,7 @@ import cors from "cors";
 
 const app = express();
 app.use(cors());                 // 모든 출처 허용 → 대시보드(브라우저)에서 호출 가능
+app.use(express.json({ limit: "8mb" }));  // 백업 데이터(JSON) 수신용
 
 /* ------------------------------------------------------------------ *
  *  종목 매핑 — 대시보드의 "종목명"을 시세 심볼에 연결합니다.
@@ -89,6 +90,57 @@ app.get("/quotes", async (_req, res) => {
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
+});
+
+/* ------------------------------------------------------------------ *
+ *  자동 백업 — 대시보드 데이터를 회원님의 비공개 GitHub 저장소에 저장.
+ *  Render 환경변수(Environment)에서 아래를 설정하세요:
+ *    GH_TOKEN    : GitHub Personal Access Token (백업 저장소 Contents 읽기/쓰기)
+ *    GH_REPO     : "사용자명/백업저장소"  예: "lawyerjwl/jw-backup"  (반드시 비공개!)
+ *    GH_PATH     : (선택) 저장 파일 경로. 기본 "liferoad-backup.json"
+ *    BACKUP_KEY  : 백업 접근 비밀번호(아무 문자열). 대시보드 설정에도 같은 값 입력.
+ * ------------------------------------------------------------------ */
+const GH_TOKEN = process.env.GH_TOKEN;
+const GH_REPO = process.env.GH_REPO;
+const GH_PATH = process.env.GH_PATH || "liferoad-backup.json";
+const BACKUP_KEY = process.env.BACKUP_KEY;
+
+function backupReady(res) {
+  if (!GH_TOKEN || !GH_REPO || !BACKUP_KEY) { res.status(503).json({ error: "backup not configured (GH_TOKEN/GH_REPO/BACKUP_KEY 필요)" }); return false; }
+  return true;
+}
+function authOK(req, res) {
+  const k = req.query.key || req.get("x-backup-key");
+  if (k !== BACKUP_KEY) { res.status(401).json({ error: "unauthorized" }); return false; }
+  return true;
+}
+const GH_HEAD = () => ({ Authorization: `Bearer ${GH_TOKEN}`, "User-Agent": "liferoad", Accept: "application/vnd.github+json" });
+
+async function ghGet() {
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(GH_PATH)}`, { headers: GH_HEAD() });
+  if (r.status === 404) return { content: null, sha: null };
+  if (!r.ok) throw new Error("github get " + r.status);
+  const j = await r.json();
+  return { content: Buffer.from(j.content, "base64").toString("utf8"), sha: j.sha };
+}
+async function ghPut(text, sha) {
+  const body = { message: "liferoad backup " + new Date().toISOString(), content: Buffer.from(text, "utf8").toString("base64") };
+  if (sha) body.sha = sha;
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(GH_PATH)}`, {
+    method: "PUT", headers: { ...GH_HEAD(), "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error("github put " + r.status + " " + (await r.text()));
+}
+
+app.get("/backup", async (req, res) => {
+  if (!backupReady(res)) return; if (!authOK(req, res)) return;
+  try { const { content } = await ghGet(); res.json({ data: content ? JSON.parse(content) : null }); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
+});
+app.post("/backup", async (req, res) => {
+  if (!backupReady(res)) return; if (!authOK(req, res)) return;
+  try { const { sha } = await ghGet(); await ghPut(JSON.stringify(req.body || {}), sha); res.json({ ok: true, at: new Date().toISOString() }); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 const port = process.env.PORT || 8787;
