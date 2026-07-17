@@ -35,6 +35,8 @@ const MAP = {
 
   "MMF":              { source: "naver", code: "488770", out: "KRW" }, // KODEX 머니마켓액티브 (398주)
 
+  "KOSPI":            { source: "naver", code: "069500", out: "KRW" }, // KODEX 200 (코스피)
+
   // 자산(우리사주) — 보유주식수 × 이 주가로 대시보드가 평가액을 계산합니다.
   "우리사주":          { source: "naver", code: "003690", out: "KRW" }, // 코리안리재보험
 
