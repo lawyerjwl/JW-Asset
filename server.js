@@ -120,18 +120,19 @@ function authOK(req, res) {
   return true;
 }
 const GH_HEAD = () => ({ Authorization: `Bearer ${GH_TOKEN}`, "User-Agent": "liferoad", Accept: "application/vnd.github+json" });
+const GH_INBOX = process.env.GH_INBOX || "liferoad-inbox.json";
 
-async function ghGet() {
-  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(GH_PATH)}`, { headers: GH_HEAD() });
+async function ghGet(path = GH_PATH) {
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(path)}`, { headers: GH_HEAD() });
   if (r.status === 404) return { content: null, sha: null };
   if (!r.ok) throw new Error("github get " + r.status);
   const j = await r.json();
   return { content: Buffer.from(j.content, "base64").toString("utf8"), sha: j.sha };
 }
-async function ghPut(text, sha) {
-  const body = { message: "liferoad backup " + new Date().toISOString(), content: Buffer.from(text, "utf8").toString("base64") };
+async function ghPut(text, sha, path = GH_PATH) {
+  const body = { message: "liferoad " + path + " " + new Date().toISOString(), content: Buffer.from(text, "utf8").toString("base64") };
   if (sha) body.sha = sha;
-  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(GH_PATH)}`, {
+  const r = await fetch(`https://api.github.com/repos/${GH_REPO}/contents/${encodeURIComponent(path)}`, {
     method: "PUT", headers: { ...GH_HEAD(), "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   if (!r.ok) throw new Error("github put " + r.status + " " + (await r.text()));
@@ -145,6 +146,35 @@ app.get("/backup", async (req, res) => {
 app.post("/backup", async (req, res) => {
   if (!backupReady(res)) return; if (!authOK(req, res)) return;
   try { const { sha } = await ghGet(); await ghPut(JSON.stringify(req.body || {}), sha); res.json({ ok: true, at: new Date().toISOString() }); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+/* ------------------------------------------------------------------ *
+ *  수신함(inbox) — 안드로이드 앱이 보낸 거래를 보관했다가 웹이 가져갑니다.
+ *  POST /inbox        { items: [거래...] }  → 기존 수신함에 이어붙임
+ *  GET  /inbox                              → { items: [...] }
+ *  POST /inbox/clear                        → 수신함 비움 (웹이 반영 후 호출)
+ * ------------------------------------------------------------------ */
+app.get("/inbox", async (req, res) => {
+  if (!backupReady(res)) return; if (!authOK(req, res)) return;
+  try { const { content } = await ghGet(GH_INBOX); res.json({ items: content ? JSON.parse(content) : [] }); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
+});
+app.post("/inbox", async (req, res) => {
+  if (!backupReady(res)) return; if (!authOK(req, res)) return;
+  try {
+    const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+    if (!items.length) return res.status(400).json({ error: "items required" });
+    const cur = await ghGet(GH_INBOX);
+    const list = cur.content ? JSON.parse(cur.content) : [];
+    const merged = [...list, ...items];
+    await ghPut(JSON.stringify(merged), cur.sha, GH_INBOX);
+    res.json({ ok: true, queued: merged.length });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+app.post("/inbox/clear", async (req, res) => {
+  if (!backupReady(res)) return; if (!authOK(req, res)) return;
+  try { const cur = await ghGet(GH_INBOX); await ghPut("[]", cur.sha, GH_INBOX); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
