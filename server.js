@@ -54,44 +54,73 @@ async function naver(code) {
       const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0", "Referer": "https://finance.naver.com/" } });
       if (!r.ok) continue;
       const j = await r.json();
-      const raw = j.closePrice ?? j?.datas?.[0]?.closePrice;
-      const p = parseFloat(String(raw || "").replace(/,/g, ""));
-      if (p > 0) return p;
+      const d = j?.datas?.[0] || j;
+      const num = (v) => { const p = parseFloat(String(v ?? "").replace(/,/g, "")); return p > 0 ? p : null; };
+      const cur = num(d.closePrice);
+      // 전일종가: 네이버가 직접 주면 사용, 없으면 현재가 − 등락폭으로 역산
+      let prev = num(d.previousClose) ?? num(d.prevClosePrice);
+      if (prev == null && cur != null) {
+        const diff = parseFloat(String(d.compareToPreviousClosePrice ?? d.changeValue ?? "").replace(/,/g, ""));
+        const sign = (String(d.compareToPreviousPrice?.code ?? d.risingType ?? "").includes("5") ||
+                      String(d.compareToPreviousClosePrice ?? "").startsWith("-")) ? -1 : 1;
+        if (!isNaN(diff) && diff !== 0) prev = cur - Math.abs(diff) * sign;
+      }
+      if (cur != null) return { price: cur, prevClose: prev ?? cur };
     } catch (e) { /* try next */ }
   }
   return null;
 }
 
-// Yahoo Finance 현재가 조회
+// Yahoo Finance 현재가 + 전일종가 조회
 async function yahoo(symbol) {
   try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
     const r = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0" } });
     if (!r.ok) return null;
     const j = await r.json();
-    const p = j?.chart?.result?.[0]?.meta?.regularMarketPrice;
-    return typeof p === "number" && p > 0 ? p : null;
+    const meta = j?.chart?.result?.[0]?.meta;
+    const p = meta?.regularMarketPrice;
+    if (typeof p !== "number" || p <= 0) return null;
+    // 전일종가: chartPreviousClose/previousClose, 없으면 종가 시계열의 직전 값
+    let prev = meta?.chartPreviousClose ?? meta?.previousClose;
+    const closes = j?.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+    if ((prev == null || prev <= 0) && Array.isArray(closes)) {
+      const valid = closes.filter((x) => typeof x === "number" && x > 0);
+      if (valid.length >= 2) prev = valid[valid.length - 2];
+    }
+    return { price: p, prevClose: (typeof prev === "number" && prev > 0) ? prev : p };
   } catch (e) {
     return null;
   }
 }
+// 환율 등 단일 값만 필요할 때
+async function yahooPrice(symbol) { const q = await yahoo(symbol); return q ? q.price : null; }
 
 app.get("/", (_req, res) => res.send("LIFE ROAD price server OK. Try /quotes"));
 
 app.get("/quotes", async (_req, res) => {
   try {
     // USD/KRW 환율
-    const fx = (await yahoo("KRW=X")) || (await yahoo("USDKRW=X"));
+    const fx = (await yahooPrice("KRW=X")) || (await yahooPrice("USDKRW=X"));
     const quotes = {};
+    const prevQuotes = {};
     for (const [name, cfg] of Object.entries(MAP)) {
-      const px = cfg.source === "naver" ? await naver(cfg.code) : await yahoo(cfg.symbol);
-      if (px == null) continue;
-      let val = px;
-      if (cfg.quote === "USD" && cfg.out === "KRW") val = px * (fx || 0);
-      if (cfg.quote === "KRW" && cfg.out === "USD") val = fx ? px / fx : px;
-      if (val > 0) quotes[name] = Math.round(val);
+      const q = cfg.source === "naver" ? await naver(cfg.code) : await yahoo(cfg.symbol);
+      if (q == null) continue;
+      const conv = (px) => {
+        let val = px;
+        if (cfg.quote === "USD" && cfg.out === "KRW") val = px * (fx || 0);
+        if (cfg.quote === "KRW" && cfg.out === "USD") val = fx ? px / fx : px;
+        return val;
+      };
+      const val = conv(q.price);
+      const prevVal = conv(q.prevClose);
+      if (val > 0) {
+        quotes[name] = Math.round(val);
+        prevQuotes[name] = Math.round(prevVal > 0 ? prevVal : val);
+      }
     }
-    res.json({ fx: fx ? Math.round(fx) : null, asof: new Date().toISOString(), quotes });
+    res.json({ fx: fx ? Math.round(fx) : null, asof: new Date().toISOString(), quotes, prevQuotes });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
