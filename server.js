@@ -26,8 +26,11 @@ app.use(express.json({ limit: "8mb" }));  // 백업 데이터(JSON) 수신용
  * ------------------------------------------------------------------ */
 const MAP = {
   // 해외 ETF (Yahoo Finance, 심볼)
-  "TLT": { source: "yahoo", symbol: "TLT", quote: "USD", out: "KRW" },
-  "VOO": { source: "yahoo", symbol: "VOO", quote: "USD", out: "KRW" },
+  "TLT": { source: "yahoo", symbol: "TLT", quote: "USD", out: "USD" },   // 달러 종목 — 대시보드가 환율 환산
+  "VOO": { source: "yahoo", symbol: "VOO", quote: "USD", out: "USD" },   // 달러 종목 — 대시보드가 환율 환산
+
+  "IAU": { source: "yahoo", symbol: "IAU", quote: "USD", out: "USD" },
+  "UNH": { source: "yahoo", symbol: "UNH", quote: "USD", out: "USD" },
 
   // 국내 상장 ETF (네이버 금융, 종목코드) — alphanumeric 코드도 지원
   "S&P500":           { source: "naver", code: "379800", out: "KRW" }, // KODEX 미국S&P500
@@ -327,6 +330,68 @@ app.get("/toss/orders/:orderId", async (req, res) => {
   if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
   try { res.json(await tossGet(`/api/v1/orders/${encodeURIComponent(req.params.orderId)}`, acc)); }
   catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
+});
+
+/* 토스 체결 이력 → LIFE ROAD 거래내역 형식으로 변환 (조회 전용)
+ *   GET /toss/sync?account=N
+ *   전체 페이지를 순회해 체결(filledQuantity>0)만 거래로 변환해 돌려줍니다.
+ *   실제 반영은 대시보드에서 사용자가 확인 후 진행합니다. */
+const TOSS_SYMBOL_MAP = {
+  "069500": "KOSPI",
+  "488770": "MMF",
+  "379800": "S&P500",
+  "0080X0": "S&P500 & 10 BOND",
+  "003690": "우리사주",
+};
+app.get("/toss/sync", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  const acc = req.query.account;
+  if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
+  try {
+    const all = [];
+    let cursor = null, guard = 0;
+    do {
+      const qs = new URLSearchParams({ status: "CLOSED", limit: "100" });
+      if (cursor) qs.append("cursor", cursor);
+      const page = await tossGet(`/api/v1/orders?${qs}`, acc);
+      const r = page.result || page;
+      (r.orders || []).forEach((o) => all.push(o));
+      cursor = r.hasNext ? r.nextCursor : null;
+    } while (cursor && ++guard < 30);
+
+    const txns = [];
+    for (const o of all) {
+      const ex = o.execution || {};
+      const qty = Number(ex.filledQuantity || 0);
+      if (!(qty > 0)) continue;                       // 미체결·취소 제외
+      const price = Number(ex.averageFilledPrice || 0);
+      if (!(price > 0)) continue;
+      const fee = Number(ex.commission || 0) + Number(ex.tax || 0);
+      const when = (ex.filledAt || o.orderedAt || "").slice(0, 10);
+      txns.push({
+        date: when,
+        name: TOSS_SYMBOL_MAP[o.symbol] || o.symbol,   // 매핑 없으면 심볼 그대로 (IAU·UNH 등)
+        type: o.side === "SELL" ? "sell" : "buy",
+        shares: qty,
+        price,
+        fee,
+        currency: o.currency || "KRW",
+        orderId: o.orderId,                            // 중복 방지용 키
+      });
+    }
+    txns.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const names = [...new Set(txns.map((t) => t.name))];
+    res.json({
+      count: txns.length,
+      fetchedOrders: all.length,
+      oldest: txns[0] ? txns[0].date : null,
+      newest: txns.length ? txns[txns.length - 1].date : null,
+      names,
+      transactions: txns,
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null });
+  }
 });
 
 app.listen(port, () => console.log("LIFE ROAD price server listening on :" + port));
