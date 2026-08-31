@@ -303,4 +303,30 @@ app.get("/toss/myip", async (req, res) => {
   });
 });
 
+// 주문 이력 조회 (GET 전용 — 주문 생성/정정/취소는 구현하지 않음)
+//   /toss/orders?account=N&status=CLOSED   종료(체결·취소) 주문
+//   /toss/orders?account=N&status=OPEN     대기중 주문
+//   그 외 쿼리(기간 등)는 그대로 토스에 전달됩니다.
+app.get("/toss/orders", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  const acc = req.query.account;
+  if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(req.query)) {
+    if (k === "account" || k === "key") continue;   // 내부용 파라미터 제외
+    if (v != null && v !== "") qs.append(k, String(v));
+  }
+  const path = "/api/v1/orders" + (qs.toString() ? `?${qs}` : "");
+  try { res.json(await tossGet(path, acc)); }
+  catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
+});
+// 주문 상세 조회
+app.get("/toss/orders/:orderId", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  const acc = req.query.account;
+  if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
+  try { res.json(await tossGet(`/api/v1/orders/${encodeURIComponent(req.params.orderId)}`, acc)); }
+  catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
+});
+
 app.listen(port, () => console.log("LIFE ROAD price server listening on :" + port));
