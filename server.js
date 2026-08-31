@@ -208,4 +208,99 @@ app.post("/inbox/clear", async (req, res) => {
 });
 
 const port = process.env.PORT || 8787;
+/* ─────────────────────────────────────────────────────────────
+ *  토스증권 Open API — 조회 전용 (주문 기능 없음)
+ *  환경변수: TOSS_CLIENT_ID, TOSS_CLIENT_SECRET
+ *  · GET /toss/accounts            계좌 목록
+ *  · GET /toss/holdings?account=N  보유 주식 + 평가
+ *  ※ 주문·조건주문 API는 의도적으로 구현하지 않음 (조회 전용)
+ * ───────────────────────────────────────────────────────────── */
+const TOSS_ID = process.env.TOSS_CLIENT_ID;
+const TOSS_SECRET = process.env.TOSS_CLIENT_SECRET;
+const TOSS_BASE = "https://openapi.tossinvest.com";
+let tossTok = { token: null, exp: 0 };
+
+function tossReady(res) {
+  if (!TOSS_ID || !TOSS_SECRET) {
+    res.status(503).json({ error: "toss not configured (TOSS_CLIENT_ID/TOSS_CLIENT_SECRET 필요)" });
+    return false;
+  }
+  return true;
+}
+// 액세스 토큰 발급 (Client Credentials) — 만료 1분 전 갱신
+async function tossToken() {
+  const now = Date.now();
+  if (tossTok.token && now < tossTok.exp) return tossTok.token;
+  const body = new URLSearchParams({ grant_type: "client_credentials", client_id: TOSS_ID, client_secret: TOSS_SECRET });
+  const r = await fetch(`${TOSS_BASE}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) throw new Error(`token failed ${r.status}: ${JSON.stringify(j).slice(0, 300)}`);
+  tossTok = { token: j.access_token, exp: now + Math.max(60, (j.expires_in || 3600) - 60) * 1000 };
+  return tossTok.token;
+}
+async function tossGet(path, accountSeq) {
+  const tok = await tossToken();
+  const headers = { Authorization: `Bearer ${tok}` };
+  if (accountSeq) headers["X-Tossinvest-Account"] = String(accountSeq);
+  const r = await fetch(`${TOSS_BASE}${path}`, { headers });
+  const txt = await r.text();
+  let j; try { j = JSON.parse(txt); } catch { j = { raw: txt.slice(0, 300) }; }
+  if (!r.ok) {
+    const e = new Error((j && j.error && j.error.message) || `HTTP ${r.status}`);
+    e.status = r.status; e.body = j;
+    throw e;
+  }
+  return j;
+}
+// 계좌 목록
+app.get("/toss/accounts", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  try { res.json(await tossGet("/api/v1/accounts")); }
+  catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
+});
+// 보유 주식 (종목별 상세 + 평가)
+app.get("/toss/holdings", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  const acc = req.query.account;
+  if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
+  try { res.json(await tossGet("/api/v1/holdings", acc)); }
+  catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
+});
+// 연결 점검용 — 토큰 발급만 시도 (키/허용IP 확인)
+app.get("/toss/ping", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  try { await tossToken(); res.json({ ok: true, message: "토큰 발급 성공" }); }
+  catch (e) { res.status(500).json({ ok: false, error: String(e.message) }); }
+});
+
+// 아웃바운드 IP 확인 — 토스 허용 IP 등록용
+// 여러 서비스에 물어봐서 실제로 나가는 공인 IP를 확인합니다.
+app.get("/toss/myip", async (req, res) => {
+  if (!authOK(req, res)) return;
+  const probes = [
+    ["ipify", "https://api.ipify.org?format=json", (j) => j.ip],
+    ["ifconfig", "https://ifconfig.me/all.json", (j) => j.ip_addr],
+    ["icanhazip", "https://icanhazip.com", (t) => String(t).trim()],
+  ];
+  const out = {};
+  for (const [name, url, pick] of probes) {
+    try {
+      const r = await fetch(url, { headers: { "User-Agent": "liferoad" } });
+      const ct = r.headers.get("content-type") || "";
+      const body = ct.includes("json") ? await r.json() : await r.text();
+      out[name] = pick(body) || null;
+    } catch (e) { out[name] = `error: ${String(e.message).slice(0, 80)}`; }
+  }
+  const ips = [...new Set(Object.values(out).filter((v) => v && !String(v).startsWith("error")))];
+  res.json({
+    outboundIPs: ips,
+    detail: out,
+    note: "이 IP들을 토스증권 WTS > 설정 > Open API > 허용 IP 관리에 등록하세요. Render는 요청마다 IP가 달라질 수 있으니 여러 번 호출해 나오는 IP를 모두 등록하는 것이 안전합니다.",
+  });
+});
+
 app.listen(port, () => console.log("LIFE ROAD price server listening on :" + port));
