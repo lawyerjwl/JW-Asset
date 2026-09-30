@@ -332,6 +332,29 @@ app.get("/toss/orders/:orderId", async (req, res) => {
   catch (e) { res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null }); }
 });
 
+/* 토스 예수금 조회 (조회 전용)
+ *   GET /toss/cash?account=N
+ *   토스 매수가능금액 API(currency=KRW / USD)의 cashBuyingPower 를 돌려줍니다.
+ *   cashBuyingPower = 순수 현금 기준 금액 (미수·자동환전 미포함) */
+app.get("/toss/cash", async (req, res) => {
+  if (!tossReady(res)) return; if (!authOK(req, res)) return;
+  const acc = req.query.account;
+  if (!acc) return res.status(400).json({ error: "account 파라미터 필요 (accountSeq)" });
+  try {
+    const pick = (j) => {
+      const r = (j && j.result) || j || {};
+      const v = Number(r.cashBuyingPower);
+      return Number.isFinite(v) ? v : null;
+    };
+    const krw = pick(await tossGet("/api/v1/buying-power?currency=KRW", acc));
+    const usd = pick(await tossGet("/api/v1/buying-power?currency=USD", acc));
+    if (krw == null && usd == null) return res.status(502).json({ error: "예수금 응답에 cashBuyingPower 가 없습니다." });
+    res.json({ krw: krw ?? 0, usd: usd ?? 0, asof: new Date().toISOString() });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: String(e.message), detail: e.body || null });
+  }
+});
+
 /* 토스 체결 이력 → LIFE ROAD 거래내역 형식으로 변환 (조회 전용)
  *   GET /toss/sync?account=N
  *   전체 페이지를 순회해 체결(filledQuantity>0)만 거래로 변환해 돌려줍니다.
